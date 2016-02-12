@@ -75,30 +75,49 @@ module PerfectQueue
           # connection test
         }
 
+        # MySQL's CONNECTION_ID() is a 64bit unsigned integer from the
+        # server's internal thread ID counter. It is unique while the MySQL
+        # server is running.
+        # https://bugs.mysql.com/bug.php?id=19806
+        #
+        # An acquired task is marked with next_timeout and CONNECTION_ID().
+        # Therefore while alive_time is not changed and we don't restart
+        # the server in 1 second, they won't conflict.
         if config[:disable_resource_limit]
+          @update_sql = <<SQL
+UPDATE `#{@table}`
+   SET timeout=:next_timeout, owner=CONNECTION_ID()
+ WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now AND created_at IS NOT NULL
+ ORDER BY timeout ASC
+ LIMIT :max_acquire
+SQL
           @sql = <<SQL
 SELECT id, timeout, data, created_at, resource
-FROM `#{@table}`
-WHERE #{EVENT_HORIZON} < timeout AND timeout <= ? AND timeout <= ?
-      AND created_at IS NOT NULL
-ORDER BY timeout ASC
-LIMIT ?
+  FROM `#{@table}`
+ WHERE timeout = ? AND owner = CONNECTION_ID()
 SQL
         else
+          @update_sql = <<SQL
+UPDATE `#{@table}`
+  JOIN (
+    SELECT id, IFNULL(max_running, 1) / (IFNULL(running, 0) + 1) AS weight
+    FROM `#{@table}`
+    LEFT JOIN (
+      SELECT resource, COUNT(1) AS running
+      FROM `#{@table}` AS t1
+      WHERE timeout > :now AND created_at IS NOT NULL AND resource IS NOT NULL
+      GROUP BY resource
+    ) AS t2 USING(resource)
+    WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now AND created_at IS NOT NULL AND IFNULL(max_running - running, 1) > 0
+    ORDER BY weight DESC, timeout ASC
+    LIMIT :max_acquire
+  ) AS t3 USING (id)
+SET timeout = :next_timeout, owner = CONNECTION_ID()
+SQL
           @sql = <<SQL
-SELECT id, timeout, data, created_at, resource, max_running, IFNULL(max_running, 1) / (IFNULL(running, 0) + 1) AS weight
-FROM `#{@table}`
-LEFT JOIN (
-  SELECT resource AS res, COUNT(1) AS running
-  FROM `#{@table}` AS T
-  WHERE timeout > ? AND created_at IS NOT NULL AND resource IS NOT NULL
-  GROUP BY resource
-) AS R ON resource = res
-WHERE #{EVENT_HORIZON} < timeout AND timeout <= ?
-      AND created_at IS NOT NULL
-      AND (max_running-running IS NULL OR max_running-running > 0)
-ORDER BY weight DESC, timeout ASC
-LIMIT ?
+SELECT id, timeout, data, created_at, resource, max_running
+  FROM `#{@table}`
+ WHERE timeout = ? AND owner = CONNECTION_ID()
 SQL
         end
 
@@ -129,9 +148,12 @@ SQL
             created_at INT,
             resource VARCHAR(255),
             max_running INT,
+            owner BIGINT(21) UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (id)
           )
           SQL
+          # CONNECTION_ID() can be 64bit
+          # https://bugs.mysql.com/bug.php?id=19806
         sql << "CREATE INDEX `index_#{@table}_on_timeout` ON `#{@table}` (`timeout`)"
         connect {
           sql.each(&@db.method(:run))
@@ -228,34 +250,32 @@ SQL
           }
         end
 
-        connect_locked {
+        connect {
           t0=Process.clock_gettime(Process::CLOCK_MONOTONIC)
+          n = @db[@update_sql, next_timeout: next_timeout, now: now, max_acquire: max_acquire].update
+          if n <= 0
+            return nil
+          end
+
           tasks = []
-          @db.fetch(@sql, now, now, max_acquire) {|row|
+          release = []
+          release_timeout = nil
+          @db.fetch(@sql, next_timeout) {|row|
+            if release_timeout
+              release << row[:id]
+              next
+            end
             attributes = create_attributes(nil, row)
             task_token = Token.new(row[:id])
             task = AcquiredTask.new(@client, row[:id], attributes, task_token)
             tasks.push task
 
             if @prefetch_break_types.include?(attributes[:type])
-              break
+              release_timeout = [row[:created_at], now-3600].min
             end
           }
-
-          if tasks.empty?
-            return nil
-          end
-
-          sql = "UPDATE `#{@table}` FORCE INDEX (PRIMARY) SET timeout=? WHERE timeout <= ? AND id IN ("
-          params = [sql, next_timeout, now]
-          tasks.each {|t| params << t.key }
-          sql << (1..tasks.size).map { '?' }.join(',')
-          sql << ") AND created_at IS NOT NULL"
-
-          n = @db[*params].update
-          if n != tasks.size
-            # NOTE table lock doesn't work. error!
-            return nil
+          if release_timeout
+            @db[@table.intern].filter(id: release).update(timeout: release_timeout)
           end
 
           @cleanup_interval_count -= 1
