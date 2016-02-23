@@ -148,12 +148,11 @@ SQL
             created_at INT,
             resource VARCHAR(255),
             max_running INT,
+            /* CONNECTION_ID() can be 64bit: https://bugs.mysql.com/bug.php?id=19806 */
             owner BIGINT(21) UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (id)
           )
           SQL
-          # CONNECTION_ID() can be 64bit
-          # https://bugs.mysql.com/bug.php?id=19806
         sql << "CREATE INDEX `index_#{@table}_on_timeout` ON `#{@table}` (`timeout`)"
         connect {
           sql.each(&@db.method(:run))
