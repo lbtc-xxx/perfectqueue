@@ -109,8 +109,6 @@ SELECT id, timeout, data, created_at, resource, max_running
 SQL
         end
 
-        @prefetch_break_types = config[:prefetch_break_types] || []
-
         @cleanup_interval = config[:cleanup_interval] || DEFAULT_DELETE_INTERVAL
         # If cleanup_interval > max_request_per_child / max_acquire,
         # some processes won't run DELETE query.
@@ -244,26 +242,12 @@ SQL
           end
 
           tasks = []
-          release = []
-          release_timeout = nil
           @db.fetch(@sql, next_timeout) {|row|
-            if release_timeout
-              release << row[:id]
-              next
-            end
             attributes = create_attributes(nil, row)
             task_token = Token.new(row[:id])
             task = AcquiredTask.new(@client, row[:id], attributes, task_token)
             tasks.push task
-
-            if @prefetch_break_types.include?(attributes[:type])
-              release_timeout = [row[:created_at], now-3600].min
-            end
           }
-          if release_timeout
-            @db[@table.intern].filter(id: release).update(timeout: release_timeout)
-          end
-
           @cleanup_interval_count -= 1
 
           return tasks

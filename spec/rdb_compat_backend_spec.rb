@@ -242,21 +242,6 @@ describe Backend::RDBCompatBackend do
         expect(now1).to receive(:to_time).exactly(5).times.and_call_original
         db.list({}){|task| expect(task.timeout).to eq now1.to_time }
       end
-      it 'returns 2 tasks' do
-        db.instance_variable_set(:@prefetch_break_types, 'test3')
-        ary = db.acquire(alive_time, max_acquire, {now: now})
-        expect(ary).to be_an_instance_of(Array)
-        expect(ary.size).to eq(3)
-
-        ary = []
-        db.list({}){|task| ary << task }
-        expect(ary[0].timeout.to_i).to eq now-3600
-        expect(ary[1].timeout.to_i).to eq now-3600
-
-        ary = db.acquire(alive_time, max_acquire, {now: now})
-        expect(ary).to be_an_instance_of(Array)
-        expect(ary.size).to eq(2)
-      end
     end
     context 'stole a task' do
       let :t0 do now - 100 end
