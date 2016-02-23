@@ -486,24 +486,6 @@ describe Backend::RDBCompatBackend do
     end
   end
 
-  context '#connect_locked' do
-    let (:ret){ double('ret') }
-    before do
-    end
-    it 'ensures to unlock on error with use_connection_pooling' do
-      #expect(STDERR).to receive(:puts)
-      config = {url: 'mysql2://root:@localhost/perfectqueue_test', table: table, use_connection_pooling: true}
-      db1 = Backend::RDBCompatBackend.new(client, config)
-      #expect{ db.__send__(:connect_locked){ raise } }.to raise_error(RuntimeError)
-      db1.__send__(:connect_locked){ ret }
-      stub_const('PerfectQueue::Backend::RDBCompatBackend::LOCK_WAIT_TIMEOUT', 5)
-      db2 = Backend::RDBCompatBackend.new(client, config)
-      Timeout.timeout(3) do
-        expect( db2.__send__(:connect_locked){ ret }).to eq ret
-      end
-    end
-  end
-
   context '#create_attributes' do
     let (:data){ {data: '{"type":"foo"}'} }
     let (:timeout){ double('timeout') }

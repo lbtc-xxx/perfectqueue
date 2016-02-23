@@ -52,18 +52,6 @@ module PerfectQueue
           else
             @use_connection_pooling = !!config[:sslca]
           end
-          @table_lock = lambda {
-            locked = nil
-            loop do
-              @db.fetch("SELECT GET_LOCK('#{@table}', #{LOCK_WAIT_TIMEOUT}) locked") do |row|
-                locked = true if row[:locked] == 1
-              end
-              break if locked
-            end
-          }
-          @table_unlock = lambda {
-            @db.run("DO RELEASE_LOCK('#{@table}')")
-          }
         else
           raise ConfigError, "only 'mysql' is supported"
         end
@@ -134,7 +122,6 @@ SQL
 
       KEEPALIVE = 10
       MAX_RETRY = 10
-      LOCK_WAIT_TIMEOUT = 60
       DEFAULT_DELETE_INTERVAL = 20
 
       def init_database(options)
@@ -353,25 +340,6 @@ SQL
       end
 
       protected
-      def connect_locked(&block)
-        connect {
-          locked = false
-
-          begin
-            if @table_lock
-              @table_lock.call
-              locked = true
-            end
-
-            return block.call
-          ensure
-            if @use_connection_pooling && locked
-              @table_unlock.call
-            end
-          end
-        }
-      end
-
       def connect(&block)
         now = Time.now.to_i
         @mutex.synchronize do
