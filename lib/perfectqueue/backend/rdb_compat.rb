@@ -73,7 +73,7 @@ module PerfectQueue
         # the server in 1 second, they won't conflict.
         if config[:disable_resource_limit]
           @update_sql = <<SQL
-UPDATE `#{@table}`
+UPDATE `#{@table}` FORCE INDEX (`index_#{@table}_on_timeout`)
    SET timeout=:next_timeout, owner=CONNECTION_ID()
  WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now AND created_at IS NOT NULL
  ORDER BY timeout ASC
