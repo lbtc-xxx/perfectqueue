@@ -80,7 +80,7 @@ UPDATE `#{@table}`
    WHERE 1300000000 < timeout AND timeout <= UNIX_TIMESTAMP()
          AND created_at IS NOT NULL
    ORDER BY timeout ASC
-      LIMIT :max_acquire) AS t1 USING(id)
+      LIMIT :max_acquire FOR UPDATE) AS t1 USING(id)
    SET timeout=:next_timeout, owner=CONNECTION_ID()
 SQL
           @sql = <<SQL
