@@ -52,6 +52,18 @@ module PerfectQueue
           else
             @use_connection_pooling = !!config[:sslca]
           end
+          @table_lock = lambda {
+            locked = nil
+            loop do
+              @db.fetch("SELECT GET_LOCK('#{@table}', #{LOCK_WAIT_TIMEOUT}) locked") do |row|
+                locked = true if row[:locked] == 1
+              end
+              break if locked
+            end
+          }
+          @table_unlock = lambda {
+            @db.run("DO RELEASE_LOCK('#{@table}')")
+          }
         else
           raise ConfigError, "only 'mysql' is supported"
         end
@@ -89,29 +101,24 @@ SELECT id, timeout, data, created_at, resource
  WHERE timeout = ? AND owner = CONNECTION_ID()
 SQL
         else
-          @update_sql = <<SQL
-UPDATE `#{@table}`
-  JOIN (
-    SELECT id, IFNULL(max_running, 1) / (IFNULL(running, 0) + 1) AS weight
-    FROM `#{@table}`
-    LEFT JOIN (
-      SELECT resource, COUNT(1) AS running
-      FROM `#{@table}` AS t1
-      WHERE timeout > :now AND created_at IS NOT NULL AND resource IS NOT NULL
-      GROUP BY resource
-    ) AS t2 USING(resource)
-    WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now AND created_at IS NOT NULL AND IFNULL(max_running - running, 1) > 0
-    ORDER BY weight DESC, timeout ASC
-    LIMIT :max_acquire
-  ) AS t3 USING (id)
-SET timeout = :next_timeout, owner = CONNECTION_ID()
-SQL
+          @update_sql = nil
           @sql = <<SQL
-SELECT id, timeout, data, created_at, resource, max_running
-  FROM `#{@table}`
- WHERE timeout = ? AND owner = CONNECTION_ID()
+SELECT id, timeout, data, created_at, resource, max_running, IFNULL(max_running, 1) / (IFNULL(running, 0) + 1) AS weight
+FROM `#{@table}`
+LEFT JOIN (
+  SELECT resource AS res, COUNT(1) AS running
+  FROM `#{@table}` AS T
+  WHERE timeout > ? AND created_at IS NOT NULL AND resource IS NOT NULL
+  GROUP BY resource
+) AS R ON resource = res
+WHERE #{EVENT_HORIZON} < timeout AND timeout <= ?
+      AND created_at IS NOT NULL
+      AND (max_running-running IS NULL OR max_running-running > 0)
+ORDER BY weight DESC, timeout ASC
+LIMIT ?
 SQL
         end
+        @prefetch_break_types = config[:prefetch_break_types] || []
 
         @cleanup_interval = config[:cleanup_interval] || DEFAULT_DELETE_INTERVAL
         # If cleanup_interval > max_request_per_child / max_acquire,
@@ -124,6 +131,7 @@ SQL
 
       KEEPALIVE = 10
       MAX_RETRY = 10
+      LOCK_WAIT_TIMEOUT = 60
       DEFAULT_DELETE_INTERVAL = 20
 
       def init_database(options)
@@ -238,24 +246,57 @@ SQL
           }
         end
 
-        connect {
-          t0=Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          n = @db[@update_sql, next_timeout: next_timeout, now: now, max_acquire: max_acquire].update
-          if n <= 0
-            return nil
-          end
+        if @update_sql
+          connect {
+            t0=Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            n = @db[@update_sql, next_timeout: next_timeout, now: now, max_acquire: max_acquire].update
+            if n <= 0
+              return nil
+            end
 
-          tasks = []
-          @db.fetch(@sql, next_timeout) {|row|
-            attributes = create_attributes(nil, row)
-            task_token = Token.new(row[:id])
-            task = AcquiredTask.new(@client, row[:id], attributes, task_token)
-            tasks.push task
+            tasks = []
+            @db.fetch(@sql, next_timeout) {|row|
+              attributes = create_attributes(nil, row)
+              task_token = Token.new(row[:id])
+              task = AcquiredTask.new(@client, row[:id], attributes, task_token)
+              tasks.push task
+            }
+            @cleanup_interval_count -= 1
+
+            return tasks
           }
-          @cleanup_interval_count -= 1
+        else
+          connect_locked {
+            t0=Process.clock_gettime(Process::CLOCK_MONOTONIC)
+            tasks = []
+            @db.fetch(@sql, now, now, max_acquire) {|row|
+              attributes = create_attributes(nil, row)
+              task_token = Token.new(row[:id])
+              task = AcquiredTask.new(@client, row[:id], attributes, task_token)
+              tasks.push task
+            }
 
-          return tasks
-        }
+            if tasks.empty?
+              return nil
+            end
+
+            sql = "UPDATE `#{@table}` FORCE INDEX (PRIMARY) SET timeout=? WHERE timeout <= ? AND id IN ("
+            params = [sql, next_timeout, now]
+            tasks.each {|t| params << t.key }
+            sql << (1..tasks.size).map { '?' }.join(',')
+            sql << ") AND created_at IS NOT NULL"
+
+            n = @db[*params].update
+            if n != tasks.size
+              # NOTE table lock doesn't work. error!
+              return nil
+            end
+
+            @cleanup_interval_count -= 1
+
+            return tasks
+          }
+        end
       ensure
         STDERR.puts "PQ:acquire from #{@table}:%6f sec (%d tasks)" % [Process.clock_gettime(Process::CLOCK_MONOTONIC)-t0,tasks.size] if tasks
       end
@@ -328,6 +369,25 @@ SQL
       end
 
       protected
+      def connect_locked(&block)
+        connect {
+          locked = false
+
+          begin
+            if @table_lock
+              @table_lock.call
+              locked = true
+            end
+
+            return block.call
+          ensure
+            if @use_connection_pooling && locked
+              @table_unlock.call
+            end
+          end
+        }
+      end
+
       def connect(&block)
         now = Time.now.to_i
         @mutex.synchronize do

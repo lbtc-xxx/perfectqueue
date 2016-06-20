@@ -242,6 +242,15 @@ describe Backend::RDBCompatBackend do
         expect(now1).to receive(:to_time).exactly(5).times.and_call_original
         db.list({}){|task| expect(task.timeout).to eq now1.to_time }
       end
+      it 'returns 5 tasks' do
+        db.instance_variable_set(:@prefetch_break_types, 'test2')
+        ary = db.acquire(alive_time, max_acquire, {})
+        expect(ary).to be_an_instance_of(Array)
+        expect(ary.size).to eq(5)
+        ary.each do |x|
+          expect(x).to be_an_instance_of(AcquiredTask)
+        end
+      end
     end
   end
 
@@ -448,6 +457,24 @@ describe Backend::RDBCompatBackend do
         node: nil,
         compression: nil,
       )
+    end
+  end
+
+  context '#connect_locked' do
+    let (:ret){ double('ret') }
+    before do
+    end
+    it 'ensures to unlock on error with use_connection_pooling' do
+      #expect(STDERR).to receive(:puts)
+      config = {url: 'mysql2://root:@localhost/perfectqueue_test', table: table, use_connection_pooling: true}
+      db1 = Backend::RDBCompatBackend.new(client, config)
+      #expect{ db.__send__(:connect_locked){ raise } }.to raise_error(RuntimeError)
+      db1.__send__(:connect_locked){ ret }
+      stub_const('PerfectQueue::Backend::RDBCompatBackend::LOCK_WAIT_TIMEOUT', 5)
+      db2 = Backend::RDBCompatBackend.new(client, config)
+      Timeout.timeout(3) do
+        expect( db2.__send__(:connect_locked){ ret }).to eq ret
+      end
     end
   end
 
