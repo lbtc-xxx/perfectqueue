@@ -99,10 +99,12 @@ UPDATE `#{@table}`
       FROM `#{@table}` AS t1
       WHERE timeout > :now AND created_at IS NOT NULL AND resource IS NOT NULL
       GROUP BY resource
+      FOR UPDATE
     ) AS t2 USING(resource)
     WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now AND created_at IS NOT NULL AND IFNULL(max_running - running, 1) > 0
     ORDER BY weight DESC, timeout ASC
     LIMIT :max_acquire
+    FOR UPDATE
   ) AS t3 USING (id)
 SET timeout = :next_timeout, owner = CONNECTION_ID()
 SQL
