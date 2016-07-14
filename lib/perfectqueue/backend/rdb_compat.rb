@@ -77,7 +77,7 @@ UPDATE `#{@table}`
   JOIN (
   SELECT id
     FROM `#{@table}` FORCE INDEX (`index_#{@table}_on_timeout`)
-   WHERE 1300000000 < timeout AND timeout <= UNIX_TIMESTAMP()
+   WHERE 1300000000 < timeout AND timeout <= :now
          AND created_at IS NOT NULL
    ORDER BY timeout ASC
       LIMIT :max_acquire FOR UPDATE) AS t1 USING(id)
