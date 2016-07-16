@@ -77,8 +77,7 @@ UPDATE `#{@table}`
   JOIN (
   SELECT id
     FROM `#{@table}` FORCE INDEX (`index_#{@table}_on_timeout`)
-   WHERE 1300000000 < timeout AND timeout <= :now
-         AND created_at IS NOT NULL
+   WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now
    ORDER BY timeout ASC
       LIMIT :max_acquire FOR UPDATE) AS t1 USING(id)
    SET timeout=:next_timeout, owner=CONNECTION_ID()
@@ -97,11 +96,11 @@ UPDATE `#{@table}`
     LEFT JOIN (
       SELECT resource, COUNT(1) AS running
       FROM `#{@table}` AS t1
-      WHERE timeout > :now AND created_at IS NOT NULL AND resource IS NOT NULL
+      WHERE timeout > :now AND resource IS NOT NULL
       GROUP BY resource
       FOR UPDATE
     ) AS t2 USING(resource)
-    WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now AND created_at IS NOT NULL AND IFNULL(max_running - running, 1) > 0
+    WHERE #{EVENT_HORIZON} < timeout AND timeout <= :now AND IFNULL(max_running - running, 1) > 0
     ORDER BY weight DESC, timeout ASC
     LIMIT :max_acquire
     FOR UPDATE
