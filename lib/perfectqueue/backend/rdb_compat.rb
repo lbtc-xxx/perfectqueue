@@ -364,7 +364,7 @@ SQL
             @last_time = now
           rescue
             # workaround for "Mysql2::Error: Deadlock found when trying to get lock; try restarting transaction" error
-            if $!.to_s.include?('try restarting transaction')
+            if $!.to_s.include?('try restarting transaction') || $!.is_a?(Sequel::DatabaseConnectionError)
               err = ([$!] + $!.backtrace.map {|bt| "  #{bt}" }).join("\n")
               count += 1
               if count < MAX_RETRY
