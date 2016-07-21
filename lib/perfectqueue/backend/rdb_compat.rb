@@ -227,9 +227,9 @@ SQL
           }
         end
 
+        tasks = []
         connect_locked {
           t0=Process.clock_gettime(Process::CLOCK_MONOTONIC)
-          tasks = []
           @db.fetch(@sql, now, now, max_acquire) {|row|
             attributes = create_attributes(nil, row)
             task_token = Token.new(row[:id])
